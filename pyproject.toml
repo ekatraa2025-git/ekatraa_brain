@@ -1,0 +1,13 @@
+[project]
+name = "ekatraa-pipecat-voice"
+version = "0.1.0"
+description = "Pipecat real-time voice bot for Ekatraa Mastra agents (Sarvam STT/TTS)"
+requires-python = ">=3.11"
+dependencies = [
+    "pipecat-ai[sarvam,openai,webrtc,silero,runner,daily]",
+    "python-dotenv>=1.0.0",
+    "aiohttp>=3.9.0",
+]
+
+[dependency-groups]
+dev = []
