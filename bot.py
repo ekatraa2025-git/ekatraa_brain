@@ -2,14 +2,16 @@
 Ekatraa Pipecat voice bot — Sarvam STT/TTS with Mastra agents via OpenAI-compatible proxy.
 
 Run locally:
-  cd pipecat-service && uv sync && uv run bot.py
+  cd pipecat-service && uv sync && uv run bot.py -t daily
 
-Web client: http://localhost:7860/client
+Web client: http://localhost:7860/
+Railway: set PORT (automatic), DAILY_API_KEY, SARVAM_API_KEY, EKATRAA_BACKEND_URL
 """
 
 from __future__ import annotations
 
 import os
+import sys
 from typing import Any
 
 from dotenv import load_dotenv
@@ -36,6 +38,70 @@ from pipecat.transports.base_transport import TransportParams
 from pipecat.transports.daily.transport import DailyParams
 
 load_dotenv()
+
+
+def _is_cloud_runtime() -> bool:
+    return bool(
+        os.getenv("PORT")
+        or os.getenv("RAILWAY_ENVIRONMENT")
+        or os.getenv("RAILWAY_ENVIRONMENT_NAME")
+        or os.getenv("RAILWAY_PUBLIC_DOMAIN")
+    )
+
+
+def _inject_runner_cli_defaults() -> None:
+    """Railway injects PORT and expects 0.0.0.0; Pipecat defaults to localhost:7860 webrtc."""
+    argv = sys.argv[1:]
+    has_transport = any(a in ("-t", "--transport") for a in argv)
+    has_host = "--host" in argv
+    has_port = "--port" in argv
+    cloud = _is_cloud_runtime()
+    extras: list[str] = []
+
+    if not has_transport:
+        transport = (os.getenv("PIPECAT_TRANSPORT") or "").strip().lower()
+        if not transport:
+            transport = "daily" if cloud else "webrtc"
+        extras.extend(["-t", transport])
+
+    if not has_host:
+        host = (os.getenv("HOST") or os.getenv("PIPECAT_HOST") or "").strip()
+        if not host:
+            host = "0.0.0.0" if cloud else "localhost"
+        extras.extend(["--host", host])
+
+    if not has_port:
+        port = (os.getenv("PORT") or os.getenv("PIPECAT_PORT") or "7860").strip()
+        extras.extend(["--port", port])
+
+    sys.argv = [sys.argv[0], *extras, *argv]
+
+
+def _validate_cloud_env() -> None:
+    if not _is_cloud_runtime():
+        return
+
+    transport = (os.getenv("PIPECAT_TRANSPORT") or "daily").strip().lower()
+    missing: list[str] = []
+    if not os.getenv("SARVAM_API_KEY") and not os.getenv("SARVAM_API_SUBSCRIPTION_KEY"):
+        missing.append("SARVAM_API_KEY")
+    if not (os.getenv("EKATRAA_BACKEND_URL") or os.getenv("EKATRAA_MASTRA_OPENAI_BASE_URL")):
+        missing.append("EKATRAA_BACKEND_URL")
+    if transport == "daily" and not os.getenv("DAILY_API_KEY"):
+        missing.append("DAILY_API_KEY")
+
+    if missing:
+        logger.warning(
+            "Cloud Pipecat deployment missing env vars: {}. Sessions will fail until these are set.",
+            ", ".join(missing),
+        )
+
+    logger.info(
+        "Cloud runtime detected — binding {}:{} transport={}",
+        os.getenv("HOST") or os.getenv("PIPECAT_HOST") or "0.0.0.0",
+        os.getenv("PORT") or os.getenv("PIPECAT_PORT") or "7860",
+        transport,
+    )
 
 
 def _lang_code(raw: str | None) -> Language:
@@ -219,6 +285,16 @@ async def bot(runner_args: RunnerArguments):
 
 
 if __name__ == "__main__":
-    from pipecat.runner.run import main
+    from pipecat.runner.run import app, main
 
+    @app.get("/health")
+    async def health():
+        return {
+            "status": "ok",
+            "service": "ekatraa-pipecat-voice",
+            "transport": (os.getenv("PIPECAT_TRANSPORT") or ("daily" if _is_cloud_runtime() else "webrtc")),
+        }
+
+    _inject_runner_cli_defaults()
+    _validate_cloud_env()
     main()
