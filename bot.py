@@ -284,6 +284,49 @@ async def bot(runner_args: RunnerArguments):
     await run_bot(transport, runner_args)
 
 
+def _cors_origins() -> list[str]:
+    raw = os.getenv("PIPECAT_CORS_ORIGINS") or os.getenv("EKATRAA_WEB_ORIGINS") or ""
+    from_env = [s.strip() for s in raw.split(",") if s.strip()]
+    defaults = [
+        "https://www.ekatraa.in",
+        "https://ekatraa.in",
+        "http://localhost:3000",
+        "http://localhost:3001",
+    ]
+    merged: list[str] = []
+    for origin in defaults + from_env:
+        if origin not in merged:
+            merged.append(origin)
+    return merged
+
+
+def _patch_pipecat_cors() -> None:
+    """Pipecat runner sets allow_origins=['*'] with allow_credentials=True — browsers reject that."""
+    import pipecat.runner.run as runner_run
+    from fastapi.middleware.cors import CORSMiddleware
+
+    def _configure_server_app(args):  # noqa: ANN001
+        runner_run.app.add_middleware(
+            CORSMiddleware,
+            allow_origins=_cors_origins(),
+            allow_credentials=True,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
+        if args.transport == "webrtc":
+            runner_run._setup_webrtc_routes(runner_run.app, args)
+            if args.whatsapp:
+                runner_run._setup_whatsapp_routes(runner_run.app, args)
+        elif args.transport == "daily":
+            runner_run._setup_daily_routes(runner_run.app, args)
+        elif args.transport in runner_run.TELEPHONY_TRANSPORTS:
+            runner_run._setup_telephony_routes(runner_run.app, args)
+        else:
+            logger.warning("Unknown transport type: {}", args.transport)
+
+    runner_run._configure_server_app = _configure_server_app
+
+
 if __name__ == "__main__":
     from pipecat.runner.run import app, main
 
@@ -297,4 +340,5 @@ if __name__ == "__main__":
 
     _inject_runner_cli_defaults()
     _validate_cloud_env()
+    _patch_pipecat_cors()
     main()
