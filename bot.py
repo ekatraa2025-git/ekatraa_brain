@@ -300,19 +300,24 @@ def _cors_origins() -> list[str]:
     return merged
 
 
+def _cors_headers(origin: str | None = None) -> dict[str, str]:
+    origins = _cors_origins()
+    allow = origin if origin and origin in origins else (origins[0] if origins else "*")
+    return {
+        "Access-Control-Allow-Origin": allow,
+        "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+        "Access-Control-Allow-Headers": "*",
+        "Access-Control-Allow-Credentials": "true",
+        "Access-Control-Max-Age": "86400",
+        "Vary": "Origin",
+    }
+
+
 def _patch_pipecat_cors() -> None:
     """Pipecat runner sets allow_origins=['*'] with allow_credentials=True — browsers reject that."""
     import pipecat.runner.run as runner_run
-    from fastapi.middleware.cors import CORSMiddleware
 
     def _configure_server_app(args):  # noqa: ANN001
-        runner_run.app.add_middleware(
-            CORSMiddleware,
-            allow_origins=_cors_origins(),
-            allow_credentials=True,
-            allow_methods=["*"],
-            allow_headers=["*"],
-        )
         if args.transport == "webrtc":
             runner_run._setup_webrtc_routes(runner_run.app, args)
             if args.whatsapp:
@@ -327,8 +332,27 @@ def _patch_pipecat_cors() -> None:
     runner_run._configure_server_app = _configure_server_app
 
 
+def _register_http_cors_and_preflight(app) -> None:
+    from fastapi import Request, Response
+    from fastapi.middleware.cors import CORSMiddleware
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_cors_origins(),
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    @app.options("/start")
+    async def options_start(request: Request):
+        return Response(status_code=204, headers=_cors_headers(request.headers.get("origin")))
+
+
 if __name__ == "__main__":
     from pipecat.runner.run import app, main
+
+    _register_http_cors_and_preflight(app)
 
     @app.get("/health")
     async def health():
