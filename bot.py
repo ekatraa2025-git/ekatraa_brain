@@ -90,18 +90,15 @@ def _validate_cloud_env() -> None:
     if transport == "daily" and not os.getenv("DAILY_API_KEY"):
         missing.append("DAILY_API_KEY")
 
-    if missing:
-        logger.warning(
-            "Cloud Pipecat deployment missing env vars: {}. Sessions will fail until these are set.",
-            ", ".join(missing),
-        )
+    host = os.getenv("HOST") or os.getenv("PIPECAT_HOST") or "0.0.0.0"
+    port = os.getenv("PORT") or os.getenv("PIPECAT_PORT") or "7860"
 
-    logger.info(
-        "Cloud runtime detected — binding {}:{} transport={}",
-        os.getenv("HOST") or os.getenv("PIPECAT_HOST") or "0.0.0.0",
-        os.getenv("PORT") or os.getenv("PIPECAT_PORT") or "7860",
-        transport,
-    )
+    if missing:
+        msg = f"Missing required Railway env vars: {', '.join(missing)}"
+        logger.error(msg)
+        raise RuntimeError(msg)
+
+    logger.info("Cloud runtime — uvicorn will bind {}:{} transport={}", host, port, transport)
 
 
 def _lang_code(raw: str | None) -> Language:
@@ -171,101 +168,104 @@ async def run_bot(transport, runner_args: RunnerArguments):
     import aiohttp
 
     aio_session = aiohttp.ClientSession()
-    tts = SarvamHttpTTSService(
-        api_key=sarvam_key,
-        aiohttp_session=aio_session,
-        settings=SarvamHttpTTSService.Settings(
-            model=tts_model,
-            voice=tts_speaker,
-            language=_lang_code(voice_lang),
-            pace=1.0,
-        ),
-    )
-
-    mastra_base = _mastra_openai_base(session)
-    llm_headers: dict[str, str] = {
-        "X-Thread-Id": str(thread_id),
-        "X-Voice-Lang": str(voice_lang),
-    }
-    if bearer:
-        token = str(bearer).strip()
-        if not token.lower().startswith("bearer "):
-            token = f"Bearer {token}"
-        llm_headers["X-User-Authorization"] = token
-
-    for key, header in (
-        ("city", "X-Voice-City"),
-        ("occasion_id", "X-Voice-Occasion-Id"),
-        ("occasion_name", "X-Voice-Occasion-Name"),
-        ("cart_owner_session_id", "X-Voice-Cart-Session"),
-    ):
-        val = session.get(key)
-        if val:
-            llm_headers[header] = str(val)
-
-    llm = OpenAILLMService(
-        api_key=os.getenv("PIPECAT_MASTRA_API_KEY") or "ekatraa-pipecat",
-        base_url=mastra_base,
-        default_headers=llm_headers,
-        settings=OpenAILLMService.Settings(
-            model="ekatraa-mastra-voice",
-            system_instruction=(
-                "You are Ekatraa voice planner. Keep responses concise and speakable. "
-                "Ground answers in Mastra tools on the server."
+    try:
+        tts = SarvamHttpTTSService(
+            api_key=sarvam_key,
+            aiohttp_session=aio_session,
+            settings=SarvamHttpTTSService.Settings(
+                model=tts_model,
+                voice=tts_speaker,
+                language=_lang_code(voice_lang),
+                pace=1.0,
             ),
-            temperature=0.4,
-            max_completion_tokens=800,
-        ),
-    )
+        )
 
-    context = LLMContext()
-    user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
-        context,
-        user_params=LLMUserAggregatorParams(vad_analyzer=SileroVADAnalyzer()),
-        assistant_params=LLMAssistantAggregatorParams(),
-    )
+        mastra_base = _mastra_openai_base(session)
+        llm_headers: dict[str, str] = {
+            "X-Thread-Id": str(thread_id),
+            "X-Voice-Lang": str(voice_lang),
+        }
+        if bearer:
+            token = str(bearer).strip()
+            if not token.lower().startswith("bearer "):
+                token = f"Bearer {token}"
+            llm_headers["X-User-Authorization"] = token
 
-    pipeline = Pipeline(
-        [
-            transport.input(),
-            stt,
-            user_aggregator,
-            llm,
-            tts,
-            transport.output(),
-            assistant_aggregator,
-        ]
-    )
+        for key, header in (
+            ("city", "X-Voice-City"),
+            ("occasion_id", "X-Voice-Occasion-Id"),
+            ("occasion_name", "X-Voice-Occasion-Name"),
+            ("cart_owner_session_id", "X-Voice-Cart-Session"),
+        ):
+            val = session.get(key)
+            if val:
+                llm_headers[header] = str(val)
 
-    task = PipelineTask(
-        pipeline,
-        params=PipelineParams(
-            enable_metrics=True,
-            enable_usage_metrics=True,
-        ),
-    )
+        llm = OpenAILLMService(
+            api_key=os.getenv("PIPECAT_MASTRA_API_KEY") or "ekatraa-pipecat",
+            base_url=mastra_base,
+            default_headers=llm_headers,
+            settings=OpenAILLMService.Settings(
+                model="ekatraa-mastra-voice",
+                system_instruction=(
+                    "You are Ekatraa voice planner. Keep responses concise and speakable. "
+                    "Ground answers in Mastra tools on the server."
+                ),
+                temperature=0.4,
+                max_completion_tokens=800,
+            ),
+        )
 
-    @transport.event_handler("on_client_connected")
-    async def on_client_connected(transport, client):
-        logger.info("Pipecat client connected (thread={})", thread_id)
-        context.add_message({
-            "role": "developer",
-            "content": "Greet the user briefly as Ekatraa AI and ask how you can help with their event planning.",
-        })
-        context.add_message({
-            "role": "user",
-            "content": "Hello",
-        })
-        await task.queue_frames([LLMRunFrame()])
+        context = LLMContext()
+        user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
+            context,
+            user_params=LLMUserAggregatorParams(vad_analyzer=SileroVADAnalyzer()),
+            assistant_params=LLMAssistantAggregatorParams(),
+        )
 
-    @transport.event_handler("on_client_disconnected")
-    async def on_client_disconnected(transport, client):
-        logger.info("Pipecat client disconnected")
-        await aio_session.close()
-        await task.cancel()
+        pipeline = Pipeline(
+            [
+                transport.input(),
+                stt,
+                user_aggregator,
+                llm,
+                tts,
+                transport.output(),
+                assistant_aggregator,
+            ]
+        )
 
-    runner = PipelineRunner(handle_sigint=False)
-    await runner.run(task)
+        task = PipelineTask(
+            pipeline,
+            params=PipelineParams(
+                enable_metrics=True,
+                enable_usage_metrics=True,
+            ),
+        )
+
+        @transport.event_handler("on_client_connected")
+        async def on_client_connected(transport, client):
+            logger.info("Pipecat client connected (thread={})", thread_id)
+            context.add_message({
+                "role": "developer",
+                "content": "Greet the user briefly as Ekatraa AI and ask how you can help with their event planning.",
+            })
+            context.add_message({
+                "role": "user",
+                "content": "Hello",
+            })
+            await task.queue_frames([LLMRunFrame()])
+
+        @transport.event_handler("on_client_disconnected")
+        async def on_client_disconnected(transport, client):
+            logger.info("Pipecat client disconnected")
+            await task.cancel()
+
+        runner = PipelineRunner(handle_sigint=False)
+        await runner.run(task)
+    finally:
+        if not aio_session.closed:
+            await aio_session.close()
 
 
 async def bot(runner_args: RunnerArguments):
